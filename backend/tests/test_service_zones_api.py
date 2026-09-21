@@ -113,3 +113,81 @@ def test_update_car_range_persists():
         assert client.patch(
             f"/api/cars/{car['id']}", json={"floor_min": 1, "floor_max": 99}
         ).status_code == 400
+
+
+def test_dispatch_reasons_do_not_cross():
+    """同楼连登记两笔：满员拒派与区间拒登各报各的原因，不串。"""
+    with TestClient(app) as client:
+        bid = _seed_zones()
+        l1 = next(
+            c for c in client.get("/api/cars").json() if c["building_id"] == bid and c["label"] == "L1"
+        )
+        # 把唯一覆盖低区的 L1 调成满员
+        db = SessionLocal()
+        try:
+            car = db.get(ElevatorCar, l1["id"])
+            car.load = car.capacity
+            db.commit()
+        finally:
+            db.close()
+
+        # 有覆盖但覆盖车满员 → 409，原因是满员而非区间
+        r = client.post(
+            "/api/calls",
+            json={"building_id": bid, "floor": 4, "direction": "up", "passengers": 1},
+        )
+        assert r.status_code == 200
+        call_id = r.json()["id"]
+        r = client.post("/api/dispatch", json={"call_id": call_id})
+        assert r.status_code == 409
+        assert "满员" in r.json()["detail"]
+        assert "无轿厢覆盖" not in r.json()["detail"]
+
+        # 再登记一笔无覆盖层 → 409，原因是无覆盖而非满员
+        r = client.post(
+            "/api/calls",
+            json={"building_id": bid, "floor": 9, "direction": "up", "passengers": 1},
+        )
+        assert r.status_code == 409
+        assert "无轿厢覆盖" in r.json()["detail"]
+
+        logs = client.get("/api/replay").json()
+        details = [l["detail"] for l in logs]
+        assert any("满员" in d for d in details)
+        assert any("无轿厢覆盖" in d for d in details)
+
+
+def test_congestion_counts_only_effective_calls():
+    """拥堵只计仍占用现场的有效呼梯：rejected 不计；区间调小后失去覆盖的 waiting 也不计。"""
+    with TestClient(app) as client:
+        bid = _seed_zones()
+        l1 = next(
+            c for c in client.get("/api/cars").json() if c["building_id"] == bid and c["label"] == "L1"
+        )
+
+        # 低区有效 waiting 呼梯：5 层 3 人
+        r = client.post(
+            "/api/calls",
+            json={"building_id": bid, "floor": 5, "direction": "up", "passengers": 3},
+        )
+        assert r.status_code == 200
+        # 无覆盖层的拒绝记录：不得计入
+        r = client.post(
+            "/api/calls",
+            json={"building_id": bid, "floor": 9, "direction": "up", "passengers": 4},
+        )
+        assert r.status_code == 409
+
+        rows = client.get("/api/congestion").json()
+        f5 = next((r for r in rows if r["floor"] == 5), None)
+        assert f5 is not None and f5["passengers"] == 3
+        assert all(r["floor"] != 9 for r in rows)
+
+        # L1 区间调小为 1–3：仍 waiting 的 5 层呼梯已无覆盖，不再占用现场
+        r = client.patch(f"/api/cars/{l1['id']}", json={"floor_min": 1, "floor_max": 3})
+        assert r.status_code == 200
+        rows = client.get("/api/congestion").json()
+        assert all(r["floor"] != 5 for r in rows)
+        # 呼梯本身仍是 waiting（没有被静默改写状态），只是不再可派、不计拥堵
+        c5 = next(c for c in client.get("/api/calls").json() if c["building_id"] == bid and c["floor"] == 5)
+        assert c5["status"] == "waiting"

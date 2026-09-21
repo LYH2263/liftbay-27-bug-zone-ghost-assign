@@ -74,3 +74,20 @@ def test_full_rejection_still_applies_within_range():
     best = pick_car(cars, CallRequest(1, 4, "up", 1))
     assert best is not None
     assert best.car_id == 2
+
+
+def test_range_reason_not_confused_with_full():
+    """区间拒登与满员拒派原因不得串：同一候梯层上两类拒绝各自只报自己的原因。"""
+    out_of_range = CarState(1, 5, "idle", load=0, capacity=10, floor_min=7, floor_max=18)
+    full = CarState(2, 5, "idle", load=10, capacity=10, floor_min=1, floor_max=6)
+    call = CallRequest(1, 5, "up", 1)
+
+    r_range = score_car(out_of_range, call)
+    assert r_range.accepted is False
+    assert "区间" in r_range.reason
+    assert "满员" not in r_range.reason
+
+    r_full = score_car(full, call)
+    assert r_full.accepted is False
+    assert "满员" in r_full.reason
+    assert "区间" not in r_full.reason

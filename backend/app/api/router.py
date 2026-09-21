@@ -78,15 +78,33 @@ def create_call(body: CallCreate, db: Session = Depends(get_db)):
         raise HTTPException(400, "楼层超出")
     if body.direction not in ("up", "down"):
         raise HTTPException(400, "方向无效")
+    car_rows = db.scalars(
+        select(ElevatorCar).where(ElevatorCar.building_id == body.building_id)
+    ).all()
+    cars = _car_states(car_rows)
+    if not any_coverage(cars, body.floor):
+        # 无任何轿厢覆盖该候梯层：不留 waiting（否则永远派不出去），
+        # 但落一条 rejected 记录并在回放中说明原因
+        ticket = CallTicket(
+            building_id=body.building_id,
+            floor=body.floor,
+            direction=body.direction,
+            passengers=body.passengers,
+            status="rejected",
+        )
+        db.add(ticket)
+        db.flush()
+        detail = f"本楼无轿厢覆盖 {body.floor} 层，拒绝登记"
+        db.add(DispatchLog(call_id=ticket.id, car_id=None, detail=detail))
+        db.commit()
+        db.refresh(ticket)
+        raise HTTPException(409, detail)
     ticket = CallTicket(
         building_id=body.building_id,
         floor=body.floor,
         direction=body.direction,
         passengers=body.passengers,
     )
-    car_rows = db.scalars(
-        select(ElevatorCar).where(ElevatorCar.building_id == body.building_id)
-    ).all()
     db.add(ticket)
     db.commit()
     db.refresh(ticket)
@@ -105,12 +123,18 @@ def dispatch(body: DispatchRequest, db: Session = Depends(get_db)):
     ).all()
     cars = _car_states(car_rows)
     call = CallRequest(ticket.id, ticket.floor, ticket.direction, ticket.passengers)
+    # 与登记端同一口径：覆盖判定统一走 covers_floor / any_coverage
+    if not any_coverage(cars, ticket.floor):
+        detail = f"本楼无轿厢覆盖 {ticket.floor} 层，拒绝派工"
+        db.add(DispatchLog(call_id=ticket.id, car_id=None, detail=detail))
+        ticket.status = "rejected"
+        db.commit()
+        db.refresh(ticket)
+        raise HTTPException(409, detail)
     best = pick_car(cars, call)
     if best is None:
-        if any_coverage(cars, ticket.floor):
-            detail = "覆盖该层的轿厢均满员，拒绝派工"
-        else:
-            detail = "本楼无轿厢覆盖该候梯层，拒绝派工"
+        # 能走到这里说明存在覆盖车，但覆盖车全部满员
+        detail = f"覆盖 {ticket.floor} 层的轿厢均满员，拒绝派工"
         db.add(DispatchLog(call_id=ticket.id, car_id=None, detail=detail))
         ticket.status = "rejected"
         db.commit()
@@ -144,9 +168,19 @@ def replay(db: Session = Depends(get_db)):
 @api_router.get("/congestion", response_model=list[CongestionFloor])
 def congestion(db: Session = Depends(get_db)):
     waiting = db.scalars(select(CallTicket).where(CallTicket.status == "waiting")).all()
-    counts = congestion_by_floor(
-        [CallRequest(c.id, c.floor, c.direction, c.passengers) for c in waiting]
-    )
+    # 仅统计仍占用现场的有效呼梯：rejected/assigned 不算，且当前必须仍有轿厢覆盖
+    #（区间被调小后遗留的 waiting 不再是可派呼梯，不应计入拥堵）
+    cars_by_building: dict[int, list[CarState]] = {}
+    effective: list[CallRequest] = []
+    for c in waiting:
+        if c.building_id not in cars_by_building:
+            rows = db.scalars(
+                select(ElevatorCar).where(ElevatorCar.building_id == c.building_id)
+            ).all()
+            cars_by_building[c.building_id] = _car_states(rows)
+        if any_coverage(cars_by_building[c.building_id], c.floor):
+            effective.append(CallRequest(c.id, c.floor, c.direction, c.passengers))
+    counts = congestion_by_floor(effective)
     return [
         CongestionFloor(floor=f, passengers=p)
         for f, p in sorted(counts.items(), key=lambda x: -x[1])

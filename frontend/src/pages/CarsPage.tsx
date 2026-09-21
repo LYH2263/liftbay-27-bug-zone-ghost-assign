@@ -17,7 +17,18 @@ export default function CarsPage() {
     api<Call[]>("/calls").then(setCalls);
     api<B[]>("/buildings").then(bs => { if (bs[0]) setFloors(bs[0].floors); });
   }, []);
-  const callFloors = useMemo(() => new Set(calls.filter(c => c.status === "waiting").map(c => c.floor)), [calls]);
+  // 与后端同一口径：只有本车服务区间覆盖到的 waiting 呼梯才在本井道标亮
+  const callFloorsByCar = useMemo(() => {
+    const byCar: Record<number, Set<number>> = {};
+    for (const car of cars) {
+      byCar[car.id] = new Set(
+        calls
+          .filter(c => c.status === "waiting" && car.floor_min <= c.floor && c.floor <= car.floor_max)
+          .map(c => c.floor),
+      );
+    }
+    return byCar;
+  }, [cars, calls]);
   const levels = useMemo(() => Array.from({ length: floors }, (_, i) => i + 1), [floors]);
   async function saveRange(car: Car) {
     const d = drafts[car.id] ?? { min: car.floor_min, max: car.floor_max };
@@ -45,7 +56,7 @@ export default function CarsPage() {
             <div className="shaft">
               <h3>{car.label} · {car.load}/{car.capacity}</h3>
               {levels.map(f => (
-                <div key={f} className={`floor-slot ${car.floor === f ? "has-car" : ""} ${callFloors.has(f) ? "has-call" : ""} ${f < car.floor_min || f > car.floor_max ? "out-of-range" : ""}`}>
+                <div key={f} className={`floor-slot ${car.floor === f ? "has-car" : ""} ${callFloorsByCar[car.id]?.has(f) ? "has-call" : ""} ${f < car.floor_min || f > car.floor_max ? "out-of-range" : ""}`}>
                   {car.floor === f ? car.direction : f}
                 </div>
               ))}

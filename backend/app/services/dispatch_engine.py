@@ -52,6 +52,10 @@ def any_coverage(cars: list[CarState], floor: int) -> bool:
 
 
 def score_car(car: CarState, call: CallRequest) -> ScoreResult:
+    # 服务区间门控：区间外候梯层一律不可派，先于满员与距离评分判定
+    if not covers_floor(car, call.floor):
+        return ScoreResult(car.car_id, -1e9, False, f"轿厢服务区间 {car.floor_min}–{car.floor_max} 不覆盖 {call.floor} 层")
+
     if car.load + call.passengers > car.capacity:
         return ScoreResult(car.car_id, -1e9, False, "轿厢满员")
 

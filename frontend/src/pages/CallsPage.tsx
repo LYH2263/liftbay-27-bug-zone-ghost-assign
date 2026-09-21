@@ -19,8 +19,12 @@ export default function CallsPage() {
     setErr("");
     try {
       await api("/calls", { method: "POST", body: JSON.stringify({ building_id: bid, floor, direction: dir, passengers: pax }) });
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      // 即使被拒（如无覆盖），后端也会留下 rejected 记录，需要刷新列表呈现
       reload();
-    } catch (e) { setErr(e instanceof Error ? e.message : String(e)); }
+    }
   }
   return (<>
     <h2>呼梯</h2>
