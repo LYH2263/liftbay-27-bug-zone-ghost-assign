@@ -52,6 +52,8 @@ def any_coverage(cars: list[CarState], floor: int) -> bool:
 
 
 def score_car(car: CarState, call: CallRequest) -> ScoreResult:
+    if not covers_floor(car, call.floor):
+        return ScoreResult(car.car_id, -1e9, False, "候梯层不在服务区间")
     if car.load + call.passengers > car.capacity:
         return ScoreResult(car.car_id, -1e9, False, "轿厢满员")
 
